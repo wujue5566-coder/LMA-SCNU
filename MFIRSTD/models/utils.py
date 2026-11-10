@@ -1,7 +1,7 @@
 from ast import literal_eval
 import distutils
 import torch.nn.functional as F
-from torch import nn, Tensor
+from torch import nn
 import copy
 
 
@@ -57,11 +57,6 @@ def _check_and_coerce_cfg_value_type(replacement, original, key, full_key):
             return False, None
 
     casts = [(tuple, list), (list, tuple)]
-    try:
-        casts.append((str, unicode))  # noqa: F821
-    except Exception:
-        pass
-
     for (from_type, to_type) in casts:
         converted, converted_value = conditional_cast(from_type, to_type)
         if converted:

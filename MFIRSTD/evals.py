@@ -8,12 +8,9 @@ from tqdm import tqdm
 import os
 import torch
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 import MFIRSTD.utils as utils
 from MFIRSTD.datasets.test.val_data import ValDataset as ValDataset
 import scipy.io as scio
-import scipy.io
-from scipy.io import savemat
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -245,7 +242,6 @@ def infer_on_dataset_test(args, model, iou_metric, nIoU_metric, PD0_FA0, data_lo
         vid_iou_dict[video_name][center_frame_name] = iou
         ###############################
         if save_pred:
-            save_name = args.dataset + '_' + video_name
             logits_out_dir = os.path.join(out_dir,args.dataset, 'logits', video_name)
             if not os.path.exists(logits_out_dir):
                 os.makedirs(logits_out_dir)
@@ -314,7 +310,10 @@ def run_inference(args, device, model, iou_metric, nIoU_metric,PD0_FA0, load_sta
                                  num_workers=args.num_workers)
     with torch.no_grad():
         if load_state_dict:
-            state_dict = torch.load(args.model_path)['model']
+            # The original checkpoints contain an argparse.Namespace alongside
+            # the state dict.  PyTorch 2.6+ defaults to weights_only=True,
+            # which rejects that trusted legacy checkpoint format.
+            state_dict = torch.load(args.model_path, map_location=device, weights_only=False)['model']
             model.load_state_dict(state_dict, strict=True)
         model.eval()
         infer_on_dataset_test(args, model, iou_metric, nIoU_metric,PD0_FA0, data_loader_val, device, msc=args.msc, flip=args.flip,

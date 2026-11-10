@@ -7,7 +7,6 @@ And modified as needed.
 VisTR criterion classes.
 Modified from DETR (https://github.com/facebookresearch/detr)
 """
-import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F

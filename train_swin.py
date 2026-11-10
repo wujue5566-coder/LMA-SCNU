@@ -79,6 +79,14 @@ def get_args_parser():
     # MAFEM_block
     parser.add_argument('--is_sc_block', default=True, type=bool,
                         help="MAFEM Switch")
+    parser.add_argument('--ablation', default=None, type=str,
+                        choices=['full', 'mafem_no_cme', 'mafem_no_ene', 'no_mafem'],
+                        help="MAFEM ablation variant: "
+                             "'full' = MAFEM (CME+EnE), "
+                             "'mafem_no_cme' = only EnE, "
+                             "'mafem_no_ene' = only CME, "
+                             "'no_mafem' = remove MAFEM. "
+                             "Defaults to the value implied by --is_sc_block.")
     parser.add_argument('--flow_loss_coef', default=1, type=float)
 
     parser.add_argument('--pretrain_settings', default=None, nargs=argparse.REMAINDER, help='for two-stage train')
@@ -136,11 +144,15 @@ def get_args_parser():
     parser.add_argument('--batch_size', default=1, type=int)
     parser.add_argument('--train_size', default=400, type=int)
     parser.add_argument('--val_size', default=400, type=int)
+    parser.add_argument('--max_train_steps', default=0, type=int,
+                        help='Stop an epoch after this many optimizer steps (0 = full epoch).')
 
     # Misc
     parser.add_argument('--device', default='cuda', help='device to use for training / testing')
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--resume', default=False, help='resume from checkpoint')
+    parser.add_argument('--amp', action='store_true',
+                        help='Use CUDA float16 autocast to reduce memory use and improve throughput.')
     parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -158,7 +170,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
                     output_viz_dir=Path('./outputs/'), use_wandb: bool = False,
-                    viz_freq: int = 1000, total_epochs=15, args=None):
+                    viz_freq: int = 1000, total_epochs=15, args=None, scaler=None):
     use_decoder = args.dec_layers > 0
     inverse_norm_transform = T.InverseNormalizeTransforms()
     model.train()
@@ -175,18 +187,29 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         os.rename(_loss_t_csv_fn, os.path.join(output_viz_dir, 'loss_{}.csv'.format(time.time())))
     loss_sum = 0
     item_count = 0
-    tt1 = time.time()
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+        if args.max_train_steps > 0 and i_iter >= args.max_train_steps:
+            break
         i_iter = i_iter + 1
         samples = samples.to(device)
         targets = [{k: v.to(device) if k in ['masks'] else v for k, v in t.items()} for t in targets]
-        if args.is_MJQM and args.is_train == 1 and use_decoder:
-            outputs, outputs_ori, flow_forwards, flow_backwards = model(samples)
-        else:
-            outputs, flow_forwards, flow_backwards = model(samples)
-        loss_dict = criterion(outputs, targets, samples.tensors, flow_forwards, flow_backwards)
-        weight_dict = criterion.weight_dict
-        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        with torch.autocast(device_type=device.type, dtype=torch.float16,
+                            enabled=getattr(args, 'amp', False)):
+            if args.is_MJQM and args.is_train == 1 and use_decoder:
+                outputs, outputs_ori, flow_forwards, flow_backwards = model(samples)
+            else:
+                outputs, flow_forwards, flow_backwards = model(samples)
+            loss_dict = criterion(outputs, targets, samples.tensors, flow_forwards, flow_backwards)
+            weight_dict = criterion.weight_dict
+            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+
+            if args.is_MJQM and args.is_train == 1 and use_decoder:
+                loss_dict = criterion(outputs_ori, targets, samples.tensors, flow_forwards,
+                                      flow_backwards)
+                balance_weight = args.balance_weight
+                losses_ori = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+                losses = losses + balance_weight * losses_ori  # 计算损失
+
         loss_dict_reduced = misc.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
                                       for k, v in loss_dict_reduced.items()}
@@ -196,18 +219,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         loss_value = losses_reduced_scaled.item()
 
         if args.is_MJQM and args.is_train == 1 and use_decoder:
-            loss_dict = criterion(outputs_ori, targets, samples.tensors, flow_forwards, flow_backwards)
-            balance_weight = args.balance_weight
-            weight_dict = criterion.weight_dict
-            losses_ori = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-            losses = losses + balance_weight * losses_ori  # 计算损失
-            loss_dict_reduced = misc.reduce_dict(loss_dict)
-            loss_dict_reduced_unscaled = {f'{k}_unscaled': v
-                                          for k, v in loss_dict_reduced.items()}
-            loss_dict_reduced_scaled = {k: v * weight_dict[k]
-                                        for k, v in loss_dict_reduced.items() if k in weight_dict}
-            losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
-            loss_ori_value = losses_reduced_scaled.item()
+            loss_ori_value = loss_value
             loss_value = loss_value + balance_weight * loss_ori_value
         if not math.isfinite(loss_value):
             logger.critical("Loss is {}, skip training for this sample".format(loss_value))
@@ -217,10 +229,18 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                                                                               targets[0]['center_frame']))
             sys.exit(1)
         optimizer.zero_grad()
-        losses.backward()
+        if scaler is None:
+            losses.backward()
+        else:
+            scaler.scale(losses).backward()
+            scaler.unscale_(optimizer)
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+        if scaler is None:
+            optimizer.step()
+        else:
+            scaler.step(optimizer)
+            scaler.update()
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         if use_wandb:
@@ -236,6 +256,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             loss_sum = 0
             item_count = 0
             record_csv(_loss_t_csv_fn, ['%e' % loss_avg])
+    logger.debug("Completed %d training steps", i_iter)
     metric_logger.synchronize_between_processes()
     logger.debug("Averaged stats:{}".format(metric_logger))
     # save_loss_plot(epoch, _loss_t_csv_fn, viz_save_dir=output_viz_dir)
@@ -305,11 +326,16 @@ def train(args, device, model, criterion):
         ]
     # import ipdb;ipdb.set_trace()
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
-    lr_scheduler = PolynomialLRDecay(optimizer, max_decay_steps=args.epochs - 1, end_learning_rate=args.end_lr,
+    lr_scheduler = PolynomialLRDecay(optimizer, max_decay_steps=max(2, args.epochs - 1), end_learning_rate=args.end_lr,
                                      power=args.poly_power)
+    scaler = torch.amp.GradScaler(device.type, enabled=getattr(args, 'amp', False))
     if hasattr(args,'pretrain_settings') and 'pretrained_model_path' in args.pretrain_settings and len(args.pretrain_settings['pretrained_model_path']) > 5:
         print(f"loading pretrained model from: {args.pretrain_settings['pretrained_model_path']}")
-        state_dict = torch.load(args.pretrain_settings['pretrained_model_path'], map_location='cpu')
+        state_dict = torch.load(
+            args.pretrain_settings['pretrained_model_path'],
+            map_location='cpu',
+            weights_only=False,
+        )
         model_without_ddp.load_state_dict(state_dict['model'], strict=False)
     ###############################################################################
     output_dir = args.output_dir
@@ -330,7 +356,7 @@ def train(args, device, model, criterion):
         train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
             args.clip_max_norm, output_viz_dir, use_wandb=args.use_wandb,
-            viz_freq=args.viz_freq, total_epochs=args.epochs, args=args)
+            viz_freq=args.viz_freq, total_epochs=args.epochs, args=args, scaler=scaler)
         t2 = time.time()
         mean_iou = infer_on_dataset_train(model, data_loader_val, device,
                                          msc=False, flip=True, save_pred=False, out_dir=output_viz_dir + '/src_' +str(epoch))
@@ -372,6 +398,8 @@ def train(args, device, model, criterion):
 
 def main(args):
     print('starting main ...')
+    torch.set_float32_matmul_precision('high')
+    torch.backends.cudnn.allow_tf32 = True
     cudnn.benchmark = False
     cudnn.deterministic = True
     seed = args.seed + misc.get_rank()

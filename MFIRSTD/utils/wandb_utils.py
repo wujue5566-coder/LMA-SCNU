@@ -4,7 +4,7 @@ import wandb
 import torch
 import numpy as np
 import random
-# import MFIRSTD.utils.misc as misc
+from MFIRSTD.utils import misc as utils
 
 
 def init_or_resume_wandb_run(wandb_id_file_path: pathlib.Path,
@@ -33,7 +33,6 @@ def init_or_resume_wandb_run(wandb_id_file_path: pathlib.Path,
         run = wandb.init(entity=entity_name, project=project_name, name=run_name, config=config)
         wandb_id_file_path.write_text(str(run.id))
 
-    wandb_config = wandb.config
     if config is not None:
         # update the current passed in config with the wandb_config
         wandb.config.update(config)
@@ -64,9 +63,7 @@ def get_viz_img(images: torch.tensor, targets: List[Dict], outputs: Dict[str, to
     src_masks = utils.interpolate(src_masks, size=temp_target_masks.shape[-2:], mode="bilinear", align_corners=False)
     src_masks = src_masks[0].cpu().detach().numpy()
     yc = src_masks.copy()
-    batch_gt = temp_target_masks.copy()
     yc_max_hwt = np.transpose(yc, [1, 2, 0])
-    gt_mask_hwt = np.transpose(batch_gt, [1, 2, 0])
 
     bin_mask_hwt = np.ones_like(yc_max_hwt)
     bin_mask_hwt[yc_max_hwt<0.5] = 0
@@ -85,8 +82,6 @@ def get_viz_img(images: torch.tensor, targets: List[Dict], outputs: Dict[str, to
     images = images.cpu().numpy()
     images = images.astype(np.uint8)
     images = np.transpose(images, [0, 2, 3, 1])
-    batch_size = images.shape[0]
-
     # Create concatenated Image for randomly sampled N frames
     nframes = 3
     rnd_idx = random.randint(0, T - nframes - 1)

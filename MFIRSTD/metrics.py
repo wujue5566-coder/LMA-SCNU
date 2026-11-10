@@ -1,69 +1,57 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from skimage import measure
 import cv2
 import numpy as np
 
 class PD0_FA0():
+    """Accumulate Pd and Fa for binary target masks.
+
+    Pd = detected true-target count / true-target count.
+    Fa = predicted non-target pixel count / total image pixel count.
+    A target is detected using the existing 3-pixel centroid matching rule.
+    """
+
     def __init__(self, nclass, thre):
         super(PD0_FA0, self).__init__()
         self.nclass = nclass
         self.thre = thre
-        self.image_area_total = []
-        self.image_area_match = []
-        self.FA0 = 0
-        self.PD0 = 0
-        self.target = 0
-        self.exlment_num = 0
+        self.reset()
+
     def update(self, preds, labels):
-
-        predits = (preds > self.thre).astype('int64')
-        labelss = labels.astype('int64')  # P
-
+        predits = np.asarray(preds > self.thre, dtype=np.uint8)
+        labelss = np.asarray(labels > 0, dtype=np.uint8)
         image = measure.label(predits, connectivity=2)
         coord_image = measure.regionprops(image)
         label = measure.label(labelss, connectivity=2)
         coord_label = measure.regionprops(label)
 
         self.target += len(coord_label)
-        self.image_area_total = []
-        self.image_area_match = []
-        self.distance_match = []
-        self.dismatch = []
-
-        for K in range(len(coord_image)):
-            area_image = np.array(coord_image[K].area)
-            self.image_area_total.append(area_image)
-        label_PD = 0
-        for i in range(len(coord_label)):
-            centroid_label = np.array(list(coord_label[i].centroid))
-            for m in range(len(coord_image)):
-
-                centroid_image = np.array(list(coord_image[m].centroid))
-                distance = np.linalg.norm(centroid_image - centroid_label)
-                area_image = np.array(coord_image[m].area)
-                if distance < 3:
-                    self.distance_match.append(distance)
-                    self.image_area_match.append(area_image)
-
-                    del coord_image[m]
+        unmatched_predictions = list(coord_image)
+        for target_region in coord_label:
+            target_centroid = np.asarray(target_region.centroid)
+            for index, prediction_region in enumerate(unmatched_predictions):
+                prediction_centroid = np.asarray(prediction_region.centroid)
+                if np.linalg.norm(prediction_centroid - target_centroid) < 3:
+                    self.PD0 += 1
+                    del unmatched_predictions[index]
                     break
-        self.dismatch = [x for x in self.image_area_total if x not in self.image_area_match]
-        self.FA0 += np.sum(self.dismatch)
-        self.PD0 += len(self.distance_match)
-        self.exlment_num += predits.size
+
+        # False alarms are every predicted foreground pixel outside the GT,
+        # not the area of an unmatched connected component.
+        self.FA0 += int(np.logical_and(predits > 0, labelss == 0).sum())
+        self.exlment_num += int(predits.size)
 
     def get(self):
-
-        Final_FA0 = self.FA0 / self.exlment_num
-        Final_PD0 = self.PD0 / self.target
-
-        return Final_FA0, Final_PD0
+        final_fa0 = self.FA0 / self.exlment_num if self.exlment_num else 0.0
+        final_pd0 = self.PD0 / self.target if self.target else 0.0
+        # Keep the historical return order used by evals.py: (Fa, Pd).
+        return final_fa0, final_pd0
 
     def reset(self):
         self.FA0 = 0
         self.PD0 = 0
+        self.target = 0
+        self.exlment_num = 0
 
 
 class SigmoidMetric():
@@ -242,7 +230,6 @@ class PD_FA():
                 self.image_area_total.append(area_image)
             label_PD = 0
             for i in range(len(coord_label)):
-                centroid_label = np.array(list(coord_label[i].centroid))
                 connectivity = 8
                 ret_label, thresholded_label, stats_label, centroids_label = cv2.connectedComponentsWithStats((labelss).astype('int8'), connectivity=connectivity)
                 num_label_region = (thresholded_label == i+1)

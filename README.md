@@ -17,33 +17,62 @@ Overall Architecture of LMAFormer.
 
 # Installation
 
+## Linux environment
 
-## Environment Setup
-The experiments were done on Windows11 with python 3 using anaconda environment. Here is details on how to set up the conda environment.
-(If you do not have anaconda 3 installed, first do it following the set up instruction from [here](https://www.anaconda.com/products/distribution)) 
+Python 3.10 and an NVIDIA GPU with CUDA are recommended. The custom
+MultiScaleDeformableAttention extension must be compiled on the same Linux
+machine and against the same CUDA version as PyTorch.
 
-* Create conda environment:
- 
-  ```create environment
-  conda create -n LMAFormer python=3
-  conda activate LMAFormer
-  ```
+```bash
+conda create -n LMAFormer python=3.10 -y
+conda activate LMAFormer
 
-* Install PyTorch from [here](https://pytorch.org/get-started/locally/). 
+# Select the command matching the machine's driver from
+# https://pytorch.org/get-started/locally/
+conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia -y
 
-* Install MultiScaleDeformableAttention module:
-  ```setup
-  python ./MFIRSTD/models/ops/setup.py install
-  
-* Install other requirements:
+pip install -r requirements.txt
+```
 
-  ```setup
-  pip install -r requirements.txt
+Install a CUDA toolkit that provides `nvcc` and matches `torch.version.cuda`.
+For example, when the PyTorch environment uses CUDA 12.1:
+
+```bash
+conda install -c "nvidia/label/cuda-12.1.0" cuda-toolkit -y
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+nvcc --version
+```
+
+Then build the custom CUDA extension from this repository:
+
+```bash
+cd MFIRSTD/models/ops
+python setup.py build install
+cd ../../..
+python -c "import MultiScaleDeformableAttention"
+```
+
+If the machine has no CUDA-capable GPU, the project can only be prepared for
+development; training and inference require a CUDA device.
 
 ## Datasets
 We evaluate network performance using NUDR-MIRSDT, IRDST and a self-built dataset TSIRMT
 
-Download the datasets following the corresponding paper/project page and update dataset paths in 'datasets/path_config.py'. 
+Download the datasets following the corresponding paper/project page. Set
+`LMAFORMER_DATASET_ROOT` to the directory containing `ImageSets`, `images`, and
+`masks`; no source-code edit is needed:
+
+```bash
+export LMAFORMER_DATASET_ROOT=/data/LMAFormer/IRDST
+```
+
+For the TeiKe helper scripts, point `LMAFORMER_TEIKE_ROOT` at the directory
+containing `data/`:
+
+```bash
+export LMAFORMER_TEIKE_ROOT=/data/LMAFormer/TeiKe
+```
+
 Here is the list of datasets used. 
 
 - [NUDT-MIRSDT](https://pan.baidu.com/s/1pSN350eurMafLiHBQBnrPA?pwd=5whn) (Extraction code: 5whn)
@@ -71,21 +100,35 @@ The models were trained and tested using a single NVIDIA 4080 GPU.
   ```
 
 # Inference
+
+### Ablation study on MAFEM (CME / EnE)
+See [ABLATION.md](ABLATION.md). The four settings are enabled with
+`--ablation full | no_mafem | mafem_no_cme | mafem_no_ene`, and
+`python run_ablation.py` trains, evaluates and tabulates all of them.
+
 ### Inference on NUDT-MIRSDT:
-    ```
-        python inference_swin.py  --model_path ./result/TSIRMT/checkpoint_NUDT-MIRSDT.pth  --dataset NUDT-MIRSDT --val_size 400 --flip --msc --output_dir ./predict/NUDT-MIRSDT  
-    ```
-    Expected miou: 73.26
+
+```bash
+python inference_swin.py --model_path ./result/NUDT-MIRSDT/checkpoint_NUDT-MIRSDT.pth --dataset NUDT-MIRSDT --val_size 400 --flip --msc --output_dir ./predict/NUDT-MIRSDT
+```
+
+Expected mIoU: 73.26
+
 ### Inference on IRDST:
-    ```
-        python inference_swin.py  --model_path ./result/IRDST/checkpoint_IRDST.pth  --dataset IRDST --val_size 400 --flip --msc --output_dir ./predict/IRDST
-    ```
-    Expected miou: 59.17
+
+```bash
+python inference_swin.py --model_path ./result/IRDST/checkpoint_IRDST.pth --dataset IRDST --val_size 400 --flip --msc --output_dir ./predict/IRDST
+```
+
+Expected mIoU: 59.17
+
 ### Inference on TSIRMT:
-    ```
-        python inference_swin.py  --model_path ./result/TSIRMT/checkpoint_TSIRMT.pth  --dataset TSIRMT --val_size 400 --flip --msc  --output_dir ./predict/TSIRMT
-    ```
-    Expected miou: 65.89
+
+```bash
+python inference_swin.py --model_path ./result/TSIRMT/checkpoint_TSIRMT.pth --dataset TSIRMT --val_size 400 --flip --msc --output_dir ./predict/TSIRMT
+```
+
+Expected mIoU: 65.89
 
 ## Results Summary
 ### Results on NUDT-MIRSDT, IRDST and TSIRMT

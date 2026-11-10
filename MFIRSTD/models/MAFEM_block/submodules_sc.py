@@ -18,12 +18,18 @@ def upconv(in_channels, out_channels,act=nn.LeakyReLU(0.1,inplace=True)):
     )
 
 class DeformableAttnBlock(nn.Module):
-    def __init__(self,n_heads=4,n_levels=5,n_points=4,d_model=192,n_sequence=5):
+    def __init__(self,n_heads=4,n_levels=5,n_points=4,d_model=192,n_sequence=5,use_flow=True):
         super().__init__()
         self.n_levels = n_levels
+        self.n_sequence = n_sequence
+        # ``use_flow=False`` is used by the "MAFEM without CME" ablation: the
+        # motion estimation branch is dropped, so the queries are built from the
+        # raw frames and the deformable attention samples without flow guidance.
+        self.use_flow = use_flow
         self.defor_attn = MSDeformAttn(d_model=d_model,n_levels=5,n_heads=n_heads,n_points=n_points)
         self.feed_forward = nn.Conv2d(d_model, d_model, kernel_size=3, padding=1)
-        self.emb_qk = nn.Conv2d(n_sequence*d_model+4*(n_sequence-1), n_sequence*d_model, kernel_size=3, padding=1)
+        n_flow_channels = 4*(n_sequence-1) if use_flow else 0
+        self.emb_qk = nn.Conv2d(n_sequence*d_model+n_flow_channels, n_sequence*d_model, kernel_size=3, padding=1)
         self.emb_v = nn.Conv2d(n_sequence*d_model, n_sequence*d_model, kernel_size=3, padding=1)
         self.act = nn.LeakyReLU(0.1,inplace=True)
         self.feedforward = nn.Sequential(
@@ -64,21 +70,25 @@ class DeformableAttnBlock(nn.Module):
             spatial_shapes.append(spatial_shape)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=srcs.device)
         return spatial_shapes,valid_ratios
-    def forward(self,frame,srcframe,flow_forward,flow_backward):
+    def forward(self,frame,srcframe,flow_forward=None,flow_backward=None):
         b,t,c,h,w = frame.shape
-        # bs,t,c,h,w = frame.shape
-        flow_forward01 = flow_forward[:, 0]
-        flow_forward12 = flow_forward[:, 1]
-        flow_backward32 = flow_backward[:, 2]
-        flow_backward43 = flow_backward[:, 3]
-        flow_forward02 = flow_forward01 + warp(flow_forward12, flow_forward01)
-        flow_backward42 = flow_backward43 + warp(flow_backward32, flow_backward43)
-        warp_fea02 = warp(frame[:,0],flow_forward02)
-        warp_fea12 = warp(frame[:,1],flow_forward12)
-        warp_fea32 = warp(frame[:,3],flow_backward32)
-        warp_fea42 = warp(frame[:, 4], flow_backward42)
+        if self.use_flow:
+            # bs,t,c,h,w = frame.shape
+            flow_forward01 = flow_forward[:, 0]
+            flow_forward12 = flow_forward[:, 1]
+            flow_backward32 = flow_backward[:, 2]
+            flow_backward43 = flow_backward[:, 3]
+            flow_forward02 = flow_forward01 + warp(flow_forward12, flow_forward01)
+            flow_backward42 = flow_backward43 + warp(flow_backward32, flow_backward43)
+            warp_fea02 = warp(frame[:,0],flow_forward02)
+            warp_fea12 = warp(frame[:,1],flow_forward12)
+            warp_fea32 = warp(frame[:,3],flow_backward32)
+            warp_fea42 = warp(frame[:, 4], flow_backward42)
 
-        qureys = self.act(self.emb_qk(torch.cat([warp_fea02,warp_fea12,frame[:,2],warp_fea32,warp_fea42,flow_forward.reshape(b,-1,h,w),flow_backward.reshape(b,-1,h,w)],1))).reshape(b,t,c,h,w)
+            qureys = self.act(self.emb_qk(torch.cat([warp_fea02,warp_fea12,frame[:,2],warp_fea32,warp_fea42,flow_forward.reshape(b,-1,h,w),flow_backward.reshape(b,-1,h,w)],1))).reshape(b,t,c,h,w)
+        else:
+            # MAFEM without CME: keep only the learned attention, no motion cues.
+            qureys = self.act(self.emb_qk(frame.reshape(b,t*c,h,w))).reshape(b,t,c,h,w)
         value = self.act(self.emb_v(frame.reshape(b,t*c,h,w)).reshape(b,t,c,h,w))
         
         spatial_shapes,valid_ratios = self.preprocess(value)

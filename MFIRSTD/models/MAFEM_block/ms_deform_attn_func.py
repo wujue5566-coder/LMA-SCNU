@@ -20,6 +20,7 @@ import MultiScaleDeformableAttention as MSDA
 
 class MSDeformAttnFunction(Function):
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step):
         ctx.im2col_step = im2col_step
         output = MSDA.ms_deform_attn_forward(
@@ -29,11 +30,12 @@ class MSDeformAttnFunction(Function):
 
     @staticmethod
     @once_differentiable
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights = ctx.saved_tensors
         grad_value, grad_sampling_loc, grad_attn_weight = \
             MSDA.ms_deform_attn_backward(
-                value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, grad_output, ctx.im2col_step)
+                value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, grad_output.contiguous(), ctx.im2col_step)
 
         return grad_value, None, None, grad_sampling_loc, grad_attn_weight, None
 

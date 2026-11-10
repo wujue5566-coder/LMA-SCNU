@@ -5,7 +5,8 @@ which was again Modified from DETR (https://github.com/facebookresearch/detr)
 And modified as needed.
 """
 import torchvision.ops
-from typing import Optional, List, OrderedDict, Dict
+from typing import Optional, List
+import os
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
@@ -22,6 +23,63 @@ from MFIRSTD.models.MAFEM_block import SC_Module as SC_Module
 BN_MOMENTUM = 0.1
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+
+# ---------------------------------------------------------------------------
+# MAFEM ablation variants
+# ---------------------------------------------------------------------------
+# Each entry maps the user facing ``--ablation`` name to
+#   (SC_Module ablation mode, is_sc_block, flow loss is used)
+ABLATION_VARIANTS = {
+    'full':         ('full',   True,  True),   # MAFEM (CME + EnE)
+    'mafem_no_cme': ('no_cme', True,  False),  # MAFEM without CME -> EnE only
+    'mafem_no_ene': ('no_ene', True,  True),   # MAFEM without EnE -> CME only
+    'no_mafem':     (None,     False, False),  # MAFEM removed
+}
+ABLATION_CHOICES = tuple(ABLATION_VARIANTS.keys())
+
+
+def resolve_ablation(args):
+    """Turn ``args.ablation`` into the flags used by the model and criterion.
+
+    ``args.ablation`` may be ``None``, in which case the historical
+    ``--is_sc_block`` flag decides (``True`` -> full model, ``False`` -> MAFEM
+    removed) so that old checkpoints/commands keep working unchanged.
+    """
+    variant = getattr(args, 'ablation', None)
+    if variant is None:
+        variant = 'full' if getattr(args, 'is_sc_block', True) else 'no_mafem'
+    if variant not in ABLATION_VARIANTS:
+        raise ValueError('unknown ablation variant %r, expected one of %s'
+                         % (variant, ABLATION_CHOICES))
+    sc_ablation, is_sc_block, use_flow_loss = ABLATION_VARIANTS[variant]
+    if is_sc_block and getattr(args, 'num_frames', 5) != 5:
+        # MAFEM expands the frames explicitly (flow indices plus the 5 warped
+        # feature maps), so anything else silently breaks inside the module.
+        raise ValueError('MAFEM supports exactly num_frames=5, got %s'
+                         % getattr(args, 'num_frames', None))
+    args.ablation = variant
+    args.sc_ablation = sc_ablation
+    args.is_sc_block = is_sc_block
+    args.use_flow_loss = use_flow_loss
+    return args
+
+
+def load_transformer_init_checkpoint(path):
+    """Load the VisTR/COCO checkpoint that initialises the transformer.
+
+    The checkpoint is optional.  When it is missing the transformer keeps its
+    default (xavier) initialisation and the training just logs a warning, so a
+    machine that only downloaded the Swin backbone can still run the ablation
+    suite.  Every variant is then trained with the same initialisation, so the
+    comparison between variants stays fair.
+    """
+    if not os.path.exists(path):
+        logger.warning('pretrained transformer checkpoint "%s" not found; '
+                       'falling back to the default initialisation.' % path)
+        return {}
+    return torch.load(path, map_location='cpu')['model']
+
 
 class MaskHeadSmallConv(nn.Module):
     """
@@ -977,6 +1035,11 @@ class VOS_SwinLMAF(nn.Module):
         flow_backward = []
         if self.is_sc_block:
             sc_weight, flow_forward, flow_backward = self.sc_4(features[2].tensors.unsqueeze(0))
+            # 'MAFEM without CME' has no motion estimation branch, so there is
+            # no flow to supervise.  Empty lists make the criterion skip the
+            # flow loss instead of failing on a None tensor.
+            if flow_forward is None:
+                flow_forward, flow_backward = [], []
 
         if self.transformer is None:
             src, mask = features[-1].decompose()
@@ -1100,6 +1163,9 @@ def build_swin_b_backbone(is_train, _swin_b_pretrained_path):
     return swin
 
 def build_model_lmaf_swinbackbone_without_criterion(args):
+    resolve_ablation(args)
+    logger.debug('ablation variant:%s (sc_ablation=%s, is_sc_block=%s, flow_loss=%s)'
+                 % (args.ablation, args.sc_ablation, args.is_sc_block, args.use_flow_loss))
     logger.debug('using backbone:%s' % args.backbone)
     if args.backbone == 'swinS':
         backbone = build_swin_s_backbone(args.is_train, args.swin_s_pretrained_path)
@@ -1128,7 +1194,8 @@ def build_model_lmaf_swinbackbone_without_criterion(args):
         is_sc_block=args.is_sc_block
     )
     if args.is_sc_block:
-        sc_block_4 = SC_Module.SC(in_channels=backbone_dims[2], n_sequence=args.num_frames, out_channels=2)
+        sc_block_4 = SC_Module.SC(in_channels=backbone_dims[2], n_sequence=args.num_frames, out_channels=2,
+                                  ablation=args.sc_ablation)
         sc_block_1 = []
         sc_block_2 = []
         sc_block_3 = []
@@ -1140,7 +1207,7 @@ def build_model_lmaf_swinbackbone_without_criterion(args):
 
     if args.is_train:  # weights initialize for training
         wcp_enc_upper_stages = False  # TODO check
-        checkpoint = torch.load(args.resnet101_coco_weights_path, map_location='cpu')['model']
+        checkpoint = load_transformer_init_checkpoint(args.resnet101_coco_weights_path)
         del_keys_1 = [k for k in checkpoint.keys() if 'vistr.backbone.' in k]
         for kk in del_keys_1:
             del checkpoint[kk]
@@ -1157,7 +1224,7 @@ def build_model_lmaf_swinbackbone_without_criterion(args):
                 checkpoint[kk.replace('vistr.transformer.', '')] = checkpoint[kk]
                 del_keys_2.append(kk)
         for kk in del_keys_2:
-            del checkpoint[kk]
+            checkpoint.pop(kk, None)
         if args.dec_layers > 6:
             cks = [k for k in checkpoint.keys() if 'decoder.layers.5.' in k]
             for i in range(6, args.dec_layers):
@@ -1253,7 +1320,7 @@ def build_model_lmaf_swinbackbone(args):
     # Model
     model = build_model_lmaf_swinbackbone_without_criterion(args)
     # Losses
-    if args.is_sc_block:
+    if args.use_flow_loss:
         weight_dict = {"loss_mask": args.mask_loss_coef, "loss_dice": args.dice_loss_coef, "loss_flow": args.flow_loss_coef}
     else:
         weight_dict = {"loss_mask": args.mask_loss_coef, "loss_dice": args.dice_loss_coef}

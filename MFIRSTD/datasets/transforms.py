@@ -7,7 +7,6 @@ And modified wherever needed.
 Transforms and data augmentation for sequence level images, bboxes and masks.
 """
 import random
-import math
 import numpy as np
 from numpy import random as rand
 import PIL
@@ -266,8 +265,6 @@ class MinIoURandomCrop(object):
                 return img, target
             min_iou = mode
             boxes = target['boxes'].numpy()
-            labels = target['labels']
-
             for i in range(50):
                 new_w = rand.uniform(self.min_crop_size * w, w)
                 new_h = rand.uniform(self.min_crop_size * h, h)

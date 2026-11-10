@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging and compiled extensions
+build/
+dist/
+*.egg-info/
+
+# IDE and OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.prof
+
+# Model checkpoints and generated experiment outputs
+ckpts/
+result/
+predict/
+wandb/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Local datasets. Split files and helper scripts remain trackable.
+Datasets/*/images/
+Datasets/*/masks/
+Datasets/*/*.mp4
+Datasets/*.mp4
+Datasets/Keii/
+Datasets/TeiKe_LMAFormer/

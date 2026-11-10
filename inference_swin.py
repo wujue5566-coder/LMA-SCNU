@@ -4,6 +4,7 @@ Based on VisTR (https://github.com/Epiphqny/VisTR)
 and DETR (https://github.com/facebookresearch/detr)
 and MED-VT (https://github.com/rkyuca/medvt)
 """
+
 import sys
 import argparse
 import logging
@@ -62,6 +63,14 @@ def get_args_parser():
       # SC block
     parser.add_argument('--is_sc_block', default=True, type=bool,
                         help="MAFEM Switch")
+    parser.add_argument('--ablation', default=None, type=str,
+                        choices=['full', 'mafem_no_cme', 'mafem_no_ene', 'no_mafem'],
+                        help="MAFEM ablation variant used when the checkpoint was trained: "
+                             "'full' = MAFEM (CME+EnE), "
+                             "'mafem_no_cme' = only EnE, "
+                             "'mafem_no_ene' = only CME, "
+                             "'no_mafem' = remove MAFEM. "
+                             "Defaults to the value implied by --is_sc_block.")
     parser.add_argument('--flow_loss_coef', default=1, type=float)
 
     # Init Weights
@@ -99,7 +108,10 @@ def get_args_parser():
 
     # Misc
     parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--num_workers', default=4, type=int)
+    # Windows uses spawn for DataLoader workers; each worker imports PyTorch and
+    # can exhaust the system page file when CUDA DLLs are loaded repeatedly.
+    parser.add_argument('--num_workers', default=0, type=int,
+                        help='DataLoader workers; use 0 on Windows to avoid CUDA DLL page-file exhaustion.')
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')

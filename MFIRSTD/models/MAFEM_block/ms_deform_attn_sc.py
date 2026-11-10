@@ -148,8 +148,8 @@ class MSDeformAttn(nn.Module):
             grid_init[:, :, i, :] *= i + 1
         with torch.no_grad():
             self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
-    def forward(self, query, reference_points, input_flatten, input_spatial_shapes, input_level_start_index, input_padding_mask,flow_forward,flow_backward):
-        """
+    def forward(self, query, reference_points, input_flatten, input_spatial_shapes, input_level_start_index, input_padding_mask,flow_forward=None,flow_backward=None):
+        r"""
         :param query                       (N, Length_{query}, C)
         :param reference_points            (N, Length_{query}, n_levels, 2), range in [0, 1], top-left (0,0), bottom-right (1, 1), including padding area
                                         or (N, Length_{query}, n_levels, 4), add additional (w, h) to form reference boxes
@@ -179,7 +179,9 @@ class MSDeformAttn(nn.Module):
             value = value.masked_fill(input_padding_mask[..., None], float(0))
         value = value.view(N, Len_in, self.n_heads, self.d_model // self.n_heads)
         sampling_offsets = sampling_offsets.view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2)
-        sampling_offsets = self.flow_guid_offset(flow_forward,flow_backward,sampling_offsets)
+        if flow_forward is not None and flow_backward is not None:
+            # Only the paper model (and the CME-only ablation) has motion cues.
+            sampling_offsets = self.flow_guid_offset(flow_forward,flow_backward,sampling_offsets)
         attention_weights = attention_weights.view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
         attention_weights = F.softmax(attention_weights, -1).view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
         # N, Len_q, n_heads, n_levels, n_points, 2
